@@ -16,6 +16,7 @@ Usage:
 """
 
 import sys
+import re
 import math
 import argparse
 from pathlib import Path
@@ -40,6 +41,56 @@ def _ansi_fg(r, g, b):
     return f"\033[38;2;{r};{g};{b}m"
 
 RESET = "\033[0m"
+
+
+# ─── Color Palettes ───────────────────────────────────────────────
+
+def _lerp(a: float, b: float, t: float) -> float:
+    return a + (b - a) * t
+
+
+def gradient_color(t: float, palette: list) -> tuple:
+    """
+    Map a scalar t ∈ [0, 1] to an RGB color by interpolating
+    through a list of (r, g, b) stops.
+    """
+    t = max(0.0, min(1.0, t))
+    n = len(palette) - 1
+    idx = t * n
+    i = int(idx)
+    frac = idx - i
+    if i >= n:
+        return palette[n]
+    c0, c1 = palette[i], palette[i + 1]
+    return (
+        int(_lerp(c0[0], c1[0], frac)),
+        int(_lerp(c0[1], c1[1], frac)),
+        int(_lerp(c0[2], c1[2], frac)),
+    )
+
+# Ember: deep blue → violet → warm orange → gold
+PALETTE_EMBER = [
+    (10, 10, 40), (60, 20, 100), (140, 40, 90),
+    (200, 80, 50), (240, 150, 50), (255, 220, 120),
+]
+
+# Cyber: dark teal → cyan → electric blue → magenta
+PALETTE_CYBER = [
+    (5, 20, 30), (10, 60, 80), (20, 140, 160),
+    (60, 200, 220), (100, 120, 255), (180, 60, 200),
+]
+
+# Mono: grayscale ramp (for testing)
+PALETTE_MONO = [
+    (13, 17, 23), (60, 70, 80), (120, 130, 140),
+    (180, 190, 200), (230, 235, 240), (255, 255, 255),
+]
+
+PALETTES = {
+    "ember": PALETTE_EMBER,
+    "cyber": PALETTE_CYBER,
+    "mono": PALETTE_MONO,
+}
 
 
 # ─── Core: Image → ASCII ──────────────────────────────────────────
@@ -105,11 +156,13 @@ def image_to_ascii(
 
 # ─── Procedural Generators ────────────────────────────────────────
 
-def generate_wave(width=100, height=40, ramp=RAMP_STANDARD) -> str:
+def generate_wave(width=100, height=40, ramp=RAMP_STANDARD,
+                  color=False, palette_name="cyber") -> str:
     """
     Interference pattern from overlapping sine waves.
     Creates organic, flowing moiré-like structures.
     """
+    palette = PALETTES.get(palette_name, PALETTE_CYBER)
     lines = []
     for y in range(height):
         row = []
@@ -123,12 +176,18 @@ def generate_wave(width=100, height=40, ramp=RAMP_STANDARD) -> str:
             # Normalize [-3, 3] → [0, 1]
             normalized = (v + 3.0) / 6.0
             idx = int(normalized * (len(ramp) - 1))
-            row.append(ramp[idx])
+            ch = ramp[idx]
+            if color:
+                r, g, b = gradient_color(normalized, palette)
+                row.append(f"{_ansi_fg(r, g, b)}{ch}{RESET}")
+            else:
+                row.append(ch)
         lines.append("".join(row))
     return "\n".join(lines)
 
 
-def generate_mandala(width=120, ramp=RAMP_STANDARD) -> str:
+def generate_mandala(width=120, ramp=RAMP_STANDARD,
+                     color=False, palette_name="ember") -> str:
     """
     Radial mandala using polar coordinates and harmonic functions.
     Produces symmetric, meditative circular patterns.
@@ -136,6 +195,7 @@ def generate_mandala(width=120, ramp=RAMP_STANDARD) -> str:
     Accounts for the 2:1 terminal character aspect ratio — the grid
     is twice as wide as tall so the rendered result appears circular.
     """
+    palette = PALETTES.get(palette_name, PALETTE_EMBER)
     height = max(1, width // 2)
     cx, cy = width / 2, height / 2
     max_r = min(cx, cy)
@@ -153,16 +213,23 @@ def generate_mandala(width=120, ramp=RAMP_STANDARD) -> str:
             v += math.sin(r * math.pi * 4) * 0.5
             normalized = (v + 1.5) / 3.0
             idx = int(max(0, min(len(ramp) - 1, normalized * (len(ramp) - 1))))
-            row.append(ramp[idx])
+            ch = ramp[idx]
+            if color:
+                cr, cg, cb = gradient_color(normalized, palette)
+                row.append(f"{_ansi_fg(cr, cg, cb)}{ch}{RESET}")
+            else:
+                row.append(ch)
         lines.append("".join(row))
     return "\n".join(lines)
 
 
-def generate_gradient_field(width=100, height=30, ramp=RAMP_STANDARD) -> str:
+def generate_gradient_field(width=100, height=30, ramp=RAMP_STANDARD,
+                            color=False, palette_name="cyber") -> str:
     """
     Smooth diagonal gradient with subtle noise texture.
     Good for testing ramp fidelity and terminal rendering.
     """
+    palette = PALETTES.get(palette_name, PALETTE_CYBER)
     lines = []
     for y in range(height):
         row = []
@@ -173,18 +240,65 @@ def generate_gradient_field(width=100, height=30, ramp=RAMP_STANDARD) -> str:
             val = base + ripple
             val = max(0.0, min(1.0, val))
             idx = int(val * (len(ramp) - 1))
-            row.append(ramp[idx])
+            ch = ramp[idx]
+            if color:
+                r, g, b = gradient_color(val, palette)
+                row.append(f"{_ansi_fg(r, g, b)}{ch}{RESET}")
+            else:
+                row.append(ch)
         lines.append("".join(row))
     return "\n".join(lines)
 
 
 # ─── Rendering to Image (for verification / export) ───────────────
 
+_ANSI_RE = re.compile(r"\033\[38;2;(\d+);(\d+);(\d+)m")
+
+
+def _parse_ansi_line(line: str):
+    """
+    Parse a line of ANSI-colored text into (char, (r,g,b)) tuples.
+    Characters without a preceding color code use the default fg.
+    """
+    result = []
+    pos = 0
+    current_color = None
+    default_fg = (201, 209, 217)
+
+    for match in _ANSI_RE.finditer(line):
+        # Text before this color code
+        for ch in line[pos:match.start()]:
+            if ch != RESET[0] or True:  # keep all chars
+                result.append((ch, current_color or default_fg))
+        current_color = (int(match.group(1)), int(match.group(2)), int(match.group(3)))
+        pos = match.end()
+
+    # Remaining text after last color code
+    for ch in line[pos:]:
+        if ch == "\033":
+            continue
+        result.append((ch, current_color or default_fg))
+
+    # Filter out reset escape remnants
+    cleaned = []
+    skip_next = 0
+    for i, (ch, col) in enumerate(result):
+        if skip_next > 0:
+            skip_next -= 1
+            continue
+        if ch == "\033":
+            skip_next = 3  # skip [0m
+            continue
+        cleaned.append((ch, col))
+    return cleaned
+
+
 def ascii_to_image(ascii_str: str, output_path: str, font_size: int = 14,
                    bg=(13, 17, 23), fg=(201, 209, 217)) -> str:
     """
     Render ASCII text to a PNG image for visual verification.
-    Uses a monospace font with dark background.
+    Supports ANSI truecolor — colored characters render in their
+    specified color. Uses a monospace font with dark background.
     """
     from PIL import Image, ImageDraw, ImageFont
 
@@ -192,7 +306,9 @@ def ascii_to_image(ascii_str: str, output_path: str, font_size: int = 14,
     char_w = font_size * 0.6  # monospace ratio
     line_h = int(font_size * 1.2)
 
-    img_w = int(len(lines[0]) * char_w) + 20
+    # Strip RESET codes for width calc
+    clean_lines = [re.sub(r"\033\[[0-9;]*m", "", ln) for ln in lines]
+    img_w = int(max(len(ln) for ln in clean_lines) * char_w) + 20
     img_h = len(lines) * line_h + 20
 
     img = Image.new("RGB", (img_w, img_h), bg)
@@ -213,7 +329,11 @@ def ascii_to_image(ascii_str: str, output_path: str, font_size: int = 14,
 
     y = 10
     for line in lines:
-        draw.text((10, y), line, fill=fg, font=font)
+        parsed = _parse_ansi_line(line)
+        x = 10
+        for ch, col in parsed:
+            draw.text((x, y), ch, fill=col, font=font)
+            x += char_w
         y += line_h
 
     img.save(output_path)
@@ -247,6 +367,9 @@ def main():
                         help="Generate procedural gradient field")
     parser.add_argument("--render", type=str, metavar="PNG",
                         help="Render ASCII output to a PNG file")
+    parser.add_argument("--palette", choices=list(PALETTES.keys()),
+                        default="cyber",
+                        help="Color palette for procedural generators (default: cyber)")
 
     args = parser.parse_args()
 
@@ -260,11 +383,14 @@ def main():
 
     # Generate or convert
     if args.wave:
-        art = generate_wave(width=args.width, ramp=ramp)
+        art = generate_wave(width=args.width, ramp=ramp,
+                            color=args.color, palette_name=args.palette)
     elif args.mandala:
-        art = generate_mandala(width=args.width, ramp=ramp)
+        art = generate_mandala(width=args.width, ramp=ramp,
+                               color=args.color, palette_name=args.palette)
     elif args.gradient:
-        art = generate_gradient_field(width=args.width, ramp=ramp)
+        art = generate_gradient_field(width=args.width, ramp=ramp,
+                                      color=args.color, palette_name=args.palette)
     elif args.image:
         if not Path(args.image).exists():
             print(f"Error: file not found: {args.image}")
@@ -284,10 +410,7 @@ def main():
     print(art)
 
     if args.render:
-        # Strip ANSI codes for image rendering
-        import re
-        clean = re.sub(r"\033\[[0-9;]*m", "", art)
-        path = ascii_to_image(clean, args.render)
+        path = ascii_to_image(art, args.render)
         print(f"\n[Rendered to {path}]", file=sys.stderr)
 
 
